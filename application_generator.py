@@ -1,6 +1,12 @@
 import os
 import openai
+import asyncio
 from dotenv import load_dotenv
+from database import get_supabase_client
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+import io
 
 load_dotenv()
 
@@ -67,6 +73,122 @@ async def generate_cover_letter(job_data: dict, user_profile: dict) -> str:
         print(f"Error generating cover letter: {e}")
         return f"Failed to generate cover letter: {e}"
 
+async def update_cv_section(section_type: str, new_content: str, user_id: int) -> None:
+    """
+    Updates a section of the CV and saves it as a new version in the database.
+
+    Args:
+        section_type (str): Type of CV section (e.g., 'summary', 'experience')
+        new_content (str): New content for the section
+        user_id (int): ID of the user
+    """
+    client = get_supabase_client()
+    
+    # Get current max version for this user and section
+    response = client.table('cv_versions') \
+        .select('version') \
+        .eq('user_id', user_id) \
+        .eq('section_type', section_type) \
+        .order('version', desc=True) \
+        .limit(1) \
+        .execute()
+    
+    next_version = 1
+    if response.data and len(response.data) > 0:
+        next_version = response.data[0]['version'] + 1
+    
+    # Insert new version
+    new_record = {
+        'user_id': user_id,
+        'section_type': section_type,
+        'content': new_content,
+        'version': next_version
+    }
+    client.table('cv_versions').insert(new_record).execute()
+
+def _generate_cv_pdf(cv_text: str) -> bytes:
+    """
+    Generates a PDF from CV text using ReportLab.
+
+    Args:
+        cv_text (str): Formatted CV text
+
+    Returns:
+        bytes: PDF content as bytes
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    
+    # Split text into paragraphs and create PDF elements
+    paragraphs = []
+    for line in cv_text.split('\n'):
+        if line.strip():
+            paragraphs.append(Paragraph(line.strip(), styles['BodyText']))
+    
+    doc.build(paragraphs)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
+
+async def generate_cv(user_id: int) -> tuple:
+    """
+    Generates CV text and PDF using the latest versions of all sections.
+
+    Args:
+        user_id (int): ID of the user
+
+    Returns:
+        tuple: (cv_text: str, pdf_bytes: bytes)
+    """
+    client = get_supabase_client()
+    
+    # Get distinct section types for the user
+    response = client.table('cv_versions') \
+        .select('section_type') \
+        .eq('user_id', user_id) \
+        .execute()
+    
+    section_types = {record['section_type'] for record in response.data}
+    
+    # Get latest version for each section
+    sections = {}
+    for section_type in section_types:
+        response = client.table('cv_versions') \
+            .select('content') \
+            .eq('user_id', user_id) \
+            .eq('section_type', section_type) \
+            .order('version', desc=True) \
+            .limit(1) \
+            .execute()
+        
+        if response.data:
+            sections[section_type] = response.data[0]['content']
+    
+    # Order sections logically
+    preferred_order = ['summary', 'experience', 'education', 'skills']
+    ordered_sections = []
+    other_sections = []
+    
+    for section_type, content in sections.items():
+        if section_type in preferred_order:
+            index = preferred_order.index(section_type)
+            ordered_sections.append((index, section_type, content))
+        else:
+            other_sections.append((len(preferred_order), section_type, content))
+    
+    all_sections = sorted(ordered_sections + other_sections, key=lambda x: x[0])
+    
+    # Build CV text
+    cv_text = ""
+    for _, section_type, content in all_sections:
+        cv_text += f"### {section_type.capitalize()}\n{content}\n\n"
+    
+    # Generate PDF
+    pdf_bytes = _generate_cv_pdf(cv_text)
+    
+    return cv_text, pdf_bytes
+
 if __name__ == "__main__":
     # Example usage (for testing purposes)
     import asyncio
@@ -104,5 +226,17 @@ if __name__ == "__main__":
         print("\n--- Generated Cover Letter ---")
         print(generated_letter)
         print("------------------------------")
+        
+        # Test CV functionality
+        user_id = 1
+        await update_cv_section('summary', 'Experienced software engineer with 5+ years in web development', user_id)
+        await update_cv_section('experience', 'Senior Developer at ABC Corp (2020-present)', user_id)
+        cv_text, pdf_bytes = await generate_cv(user_id)
+        print("\n--- Generated CV Text ---")
+        print(cv_text)
+        print("--------------------------")
+        with open('test_cv.pdf', 'wb') as f:
+            f.write(pdf_bytes)
+        print("PDF saved as test_cv.pdf")
 
     asyncio.run(main())

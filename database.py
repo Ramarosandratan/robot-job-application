@@ -301,6 +301,7 @@ async def initialize_database(client: Client):
     await create_applications_table(client)
     await create_user_skills_table(client)
     await create_job_skills_table(client)
+    await create_cv_versions_table(client)
     print("Database initialization complete.")
 
 if __name__ == "__main__":
