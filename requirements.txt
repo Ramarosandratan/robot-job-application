@@ -1,5 +1,5 @@
 playwright
-supabase-py
+supabase
 psycopg2-binary
 scikit-learn
 openai
